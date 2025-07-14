@@ -1,1 +1,1 @@
-See https://github.com/DicomCube/spacetransformer-core
+See https://github.com/fastdiag-toolbox/spacetransformer-core
