@@ -11,7 +11,7 @@ keywords = ["medical-imaging", "geometry", "transform", "torch", "gpu"]
 license = {text = "MIT"}
 dependencies = [
   "torch>=1.12",
-  "spacetransformer-core>=0.2.0",
+  "spacetransformer-core>=0.2.1",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
