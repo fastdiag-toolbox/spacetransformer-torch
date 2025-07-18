@@ -4,15 +4,6 @@ This module provides efficient GPU-accelerated image warping capabilities for
 3D medical images using PyTorch. It supports various interpolation modes and
 optimization strategies for different transformation scenarios.
 
-Design Philosophy:
-    The core workflow follows A(source) → C → D → B(target) pattern:
-    - A→C: Only cropping/padding (_trans_shift)
-    - C→D: Either flip/permute operations or general grid_sample (_trans_general)
-    - D→B: Same as A→C (_trans_shift)
-    
-    This approach optimizes performance by using fast tensor operations when
-    possible and falling back to general interpolation only when necessary.
-
 Example:
     Basic image warping between spaces:
     
@@ -43,6 +34,7 @@ from torch.nn import functional as F
 from spacetransformer.core.space import Space
 from spacetransformer.core import relation_check as rc
 from spacetransformer.core.pointset_warpers import calc_transform
+from spacetransformer.core.exceptions import ValidationError, CudaError
 
 from .affine_builder import build_grid
 from .utils import norm_dim, norm_type
@@ -172,8 +164,22 @@ def _trans_shift(
     pad_mode: str,
     pad_value: float,
 ) -> torch.Tensor:
-    """仅支持 base/spacing 完全一致且 align_corners=True 的纯平移裁剪。"""
-    img = norm_type(img, dtype=None)  # 保持 dtype
+    """Perform translation-only transformation with cropping/padding.
+    
+    This function supports spaces that only differ in their origin position,
+    requiring only cropping and padding operations without interpolation.
+    
+    Args:
+        img: Input tensor
+        source: Source geometric space
+        target: Target geometric space
+        pad_mode: Padding mode for out-of-bounds regions
+        pad_value: Padding value for constant mode
+        
+    Returns:
+        torch.Tensor: Cropped/padded tensor
+    """
+    img = norm_type(img, dtype=None)  # Preserve dtype
     R = source._orientation_matrix()
     M = R * np.array(source.spacing)[None, :]
     offset_origin = np.round(np.linalg.solve(M, np.array(target.origin) - np.array(source.origin))).astype(int)
@@ -186,18 +192,36 @@ def _trans_shift(
 # -------------------------------------------------------------------------
 
 def _trans_flip(img: torch.Tensor, flip_dims: List[int]):
+    """Flip tensor along specified dimensions.
+    
+    Args:
+        img: Input tensor
+        flip_dims: List of dimensions to flip (0=x, 1=y, 2=z)
+        
+    Returns:
+        torch.Tensor: Flipped tensor
+    """
     img = norm_type(img, dtype=None)
     dims = []
     for idx in range(3):
         if flip_dims[idx]:
-            dims.append(idx - 3)  # 转到负索引, 因为后面要对应 D,H,W (倒数123位)
+            dims.append(idx - 3)  # Convert to negative indices for D,H,W (last 3 dims)
     if dims:
         img = torch.flip(img, dims)
     return img
 
 
 def _trans_permute(img: torch.Tensor, axis_order: List[int]):
-    # batch(0) channel(1) 保持，后面 +2
+    """Permute tensor axes according to specified order.
+    
+    Args:
+        img: Input tensor
+        axis_order: New axis order for the last 3 dimensions
+        
+    Returns:
+        torch.Tensor: Permuted tensor
+    """
+    # Preserve batch(0) and channel(1) dimensions, only permute the spatial dims (+2)
     order = [0, 1] + [ax + 2 for ax in axis_order]
     return img.permute(order)
 
@@ -243,7 +267,18 @@ def to_ndc_space(space:Space) -> Space:
     
 
 def _calc_theta_ndc(source: Space, target: Space) -> np.ndarray:
-    """计算 target.ndc → source.ndc 的 3×4 θ 矩阵 (float32)。"""
+    """Calculate the 3×4 theta matrix for target.ndc → source.ndc transformation.
+    
+    This function computes the transformation matrix needed for grid_sample
+    in normalized device coordinates (NDC).
+    
+    Args:
+        source: Source geometric space
+        target: Target geometric space
+        
+    Returns:
+        np.ndarray: 3×4 transformation matrix in float32
+    """
     # target.index → source.index
     source = to_ndc_space(source)
     target = to_ndc_space(target)
@@ -263,7 +298,23 @@ def _trans_general(
     pad_value: float,
     half: bool = False,
 ) -> torch.Tensor:
-    """通用路径：一次 grid_sample 完成任意仿射/旋转/缩放。"""
+    """Perform general affine transformation using grid_sample.
+    
+    This function handles arbitrary affine transformations between spaces,
+    including rotation, scaling, and skew, using PyTorch's grid_sample.
+    
+    Args:
+        img: Input tensor
+        source: Source geometric space
+        target: Target geometric space
+        mode: Interpolation mode
+        pad_mode: Padding mode
+        pad_value: Padding value for constant mode
+        half: Whether to use half precision
+        
+    Returns:
+        torch.Tensor: Transformed tensor
+    """
     img = norm_type(img, cuda=True, half=half)
 
     theta_np = _calc_theta_ndc(source, target)  # 3×4
@@ -274,7 +325,25 @@ def _trans_general(
     grid = build_grid(theta, target.shape, half=half)
     return _do_warping(img, grid, mode=mode, pad_mode=pad_mode, pad_value=pad_value)
 
+
 def _trans_zoom(img: torch.Tensor, source: Space, target: Space, pad_mode: str, pad_value: float, mode: str, half: bool):
+    """Perform pure scaling transformation using interpolate.
+    
+    This function handles transformations that only involve scaling,
+    using PyTorch's interpolate function for better performance.
+    
+    Args:
+        img: Input tensor
+        source: Source geometric space
+        target: Target geometric space
+        pad_mode: Padding mode
+        pad_value: Padding value
+        mode: Interpolation mode
+        half: Whether to use half precision
+        
+    Returns:
+        torch.Tensor: Scaled tensor
+    """
     if mode == 'nearest':
         mode = 'nearest-exact'
     return F.interpolate(img, target.shape, align_corners=True, mode=mode)
@@ -283,7 +352,19 @@ def _trans_zoom(img: torch.Tensor, source: Space, target: Space, pad_mode: str, 
 # -------------------------------------------------------------------------
 
 def _trans_empty(img: torch.Tensor | np.ndarray, target: Space, pad_value: float):
-    """返回全填充值的空图像 (shape 与 target 一致)。"""
+    """Create an empty tensor filled with pad_value matching target shape.
+    
+    This function creates a tensor with the shape of the target space,
+    filled entirely with the padding value. Used when spaces don't overlap.
+    
+    Args:
+        img: Reference input tensor or array (for device and dtype)
+        target: Target geometric space
+        pad_value: Fill value
+        
+    Returns:
+        torch.Tensor or np.ndarray: Empty tensor or array with target shape
+    """
     if isinstance(img, torch.Tensor):
         channel = img.shape[1] if img.ndim == 5 else 1
         return torch.full([1, channel] + list(target.shape), pad_value, dtype=img.dtype, device=img.device)
@@ -337,8 +418,8 @@ def warp_image(
         Resampled image in target space with same type as input (unless numpy=True)
         
     Raises:
-        ValueError: If input dimensions are invalid
-        RuntimeError: If CUDA operations fail
+        ValidationError: If input dimensions are invalid
+        CudaError: If CUDA operations fail
         
     Example:
         Basic image resampling:
@@ -368,91 +449,118 @@ def warp_image(
         >>> resampled_half = warp_image(image, source, target, 
         ...                            pad_value=0.0, half=True)
     """
-    # 记录输入信息
-    input_ndim = img.ndim
-    is_numpy_in = isinstance(img, np.ndarray) or numpy
-    origin_device = img.device if isinstance(img, torch.Tensor) else None
+    from .validation import (
+        validate_image_tensor,
+        validate_space, 
+        validate_interpolation_mode,
+        validate_padding_mode,
+        validate_device
+    )
+    
+    try:
+        # 1. 先验证所有输入参数
+        source = validate_space(source, name="source")
+        target = validate_space(target, name="target")
+        mode = validate_interpolation_mode(mode)
+        pad_mode = validate_padding_mode(pad_mode)
+        device = validate_device(cuda_device)
+        
+        # 2. 验证图像并记录输入信息
+        img_tensor, input_ndim = validate_image_tensor(img, min_dim=3, max_dim=5, name="img")
+        is_numpy_in = isinstance(img, np.ndarray) or numpy
+        origin_device = img_tensor.device
 
-    # 完全相同空间：直接返回，避免任何数值误差
-    if source == target:
-        print("source == target")
-        if is_numpy_in:
-            if isinstance(img, np.ndarray):
-                return img
-            else:  # torch.Tensor → numpy 输出
-                return img.detach().cpu().numpy()
+        # 完全相同空间：直接返回，避免任何数值误差
+        if source == target:
+            print("source == target")
+            if is_numpy_in:
+                if isinstance(img, np.ndarray):
+                    return img
+                else:  # torch.Tensor → numpy 输出
+                    return img.detach().cpu().numpy()
+            else:
+                # 输出 torch.Tensor，维持原 device
+                return img_tensor
+
+        # 判断无交集
+        if rc._check_no_overlap(source, target):
+            out = _trans_empty(img_tensor, target, pad_value)
+            return __normback(out, is_numpy_in, input_ndim, origin_device)
+
+        # 3. 现在规范化维度 - 图像已经验证过了
+        img_5d = norm_dim(img_tensor)
+
+        # ---------------------------------------------------------------
+        # 1) 计算 C、D ----------------------------------------------------
+        # ---------------------------------------------------------------
+        bbox_B_in_A = rc.find_tight_bbox(target, source)  # B 对 A
+        bbox_A_in_B = rc.find_tight_bbox(source, target)  # A 对 B
+        if np.prod(bbox_B_in_A[:, 1] - bbox_B_in_A[:, 0]) / np.prod(source.shape) > 0.6:
+            C = source
         else:
-            # 输出 torch.Tensor，维持原 device
-            return img if isinstance(img, torch.Tensor) else torch.as_tensor(img, device=origin_device)
+            C = source.apply_bbox(bbox_B_in_A)
+        if np.prod(bbox_A_in_B[:, 1] - bbox_A_in_B[:, 0]) / np.prod(target.shape) > 0.6:
+            D = target
+        else:
+            D = target.apply_bbox(bbox_A_in_B)
 
-    # 判断无交集
-    if rc._check_no_overlap(source, target):
-        tensor_like = img if isinstance(img, torch.Tensor) else torch.as_tensor(img)
-        out = _trans_empty(tensor_like, target, pad_value)
-        return __normback(out, is_numpy_in, input_ndim, origin_device)
+        # ---------------------------------------------------------------
+        # 2) A → C (shift) ----------------------------------------------
+        # ---------------------------------------------------------------
+        if C == source:
+            img_AC = img_5d  # no-op
+        else:
+            img_AC = _trans_shift(img_5d, source, C, pad_mode=pad_mode, pad_value=pad_value)
 
-    # 统一成 5D tensor（不立即转 dtype/device）
-    img_5d = norm_dim(img)
-
-    # ---------------------------------------------------------------
-    # 1) 计算 C、D ----------------------------------------------------
-    # ---------------------------------------------------------------
-    bbox_B_in_A = rc.find_tight_bbox(target, source)  # B 对 A
-    bbox_A_in_B = rc.find_tight_bbox(source, target)  # A 对 B
-    if np.prod(bbox_B_in_A[:, 1] - bbox_B_in_A[:, 0]) / np.prod(source.shape) > 0.6:
-        C = source
-    else:
-        C = source.apply_bbox(bbox_B_in_A)
-    if np.prod(bbox_A_in_B[:, 1] - bbox_A_in_B[:, 0]) / np.prod(target.shape) > 0.6:
-        D = target
-    else:
-        D = target.apply_bbox(bbox_A_in_B)
-
-    # ---------------------------------------------------------------
-    # 2) A → C (shift) ----------------------------------------------
-    # ---------------------------------------------------------------
-    if C == source:
-        img_AC = img_5d  # no-op
-    else:
-        img_AC = _trans_shift(img_5d, source, C, pad_mode=pad_mode, pad_value=pad_value)
-
-    # ---------------------------------------------------------------
-    # 3) C → D -------------------------------------------------------
-    # ---------------------------------------------------------------
-    if C == D:
-        img_CD = img_AC
-    else:
-        flag_flip, flip_dims, axis_order = rc._check_valid_flip_permute(C, D)
-        if flag_flip:
-            tmp = _trans_flip(img_AC, flip_dims)
-            img_CD = _trans_permute(tmp, axis_order)
-        else:  
-            if rc._check_align_corner(C, D) and rc._check_same_base(C, D):
-                img_CD = _trans_zoom(img_AC, C, D, pad_mode=pad_mode, pad_value=pad_value, mode=mode, half=half)
+        # ---------------------------------------------------------------
+        # 3) C → D -------------------------------------------------------
+        # ---------------------------------------------------------------
+        if C == D:
+            img_CD = img_AC
+        else:
+            flag_flip, flip_dims, axis_order = rc._check_valid_flip_permute(C, D)
+            if flag_flip:
+                tmp = _trans_flip(img_AC, flip_dims)
+                img_CD = _trans_permute(tmp, axis_order)
             else:  
-                img_CD = _trans_general(
-                    img_AC,
-                    C,
-                    D,
-                    mode=mode,
-                    pad_mode=pad_mode,
-                    pad_value=pad_value,
-                    half=half,
-                )
+                if rc._check_align_corner(C, D) and rc._check_same_base(C, D):
+                    img_CD = _trans_zoom(img_AC, C, D, pad_mode=pad_mode, pad_value=pad_value, mode=mode, half=half)
+                else:  
+                    img_CD = _trans_general(
+                        img_AC,
+                        C,
+                        D,
+                        mode=mode,
+                        pad_mode=pad_mode,
+                        pad_value=pad_value,
+                        half=half,
+                    )
 
-    # ---------------------------------------------------------------
-    # 4) D → B (shift) ----------------------------------------------
-    # ---------------------------------------------------------------
-    if D == target:
-        img_DB = img_CD  # no-op
-    else:
-        img_DB = _trans_shift(img_CD, D, target, pad_mode=pad_mode, pad_value=pad_value)
+        # ---------------------------------------------------------------
+        # 4) D → B (shift) ----------------------------------------------
+        # ---------------------------------------------------------------
+        if D == target:
+            img_DB = img_CD  # no-op
+        else:
+            img_DB = _trans_shift(img_CD, D, target, pad_mode=pad_mode, pad_value=pad_value)
 
-    # ---------------------------------------------------------------
-    # 5) 收尾 --------------------------------------------------------
-    # ---------------------------------------------------------------
-    output = img_DB
-    return __normback(output, is_numpy_in, input_ndim, origin_device)
+        # ---------------------------------------------------------------
+        # 5) 收尾 --------------------------------------------------------
+        # ---------------------------------------------------------------
+        output = img_DB
+        return __normback(output, is_numpy_in, input_ndim, origin_device)
+        
+    except Exception as e:
+        # Convert PyTorch CUDA errors to CudaError
+        if isinstance(e, (RuntimeError, torch.cuda.CudaError)) and ("CUDA" in str(e) or "cuda" in str(e).lower()):
+            from .gpu_utils import handle_cuda_error
+            handle_cuda_error(e, "image warping")
+        # Pass through our validation errors
+        elif isinstance(e, (ValidationError, CudaError)):
+            raise
+        # Convert other errors to ValidationError
+        else:
+            raise ValidationError(f"Error during image warping: {e}")
 
 
 # -------------------------------------------------------------------------
@@ -470,25 +578,88 @@ def warp_image_batch(
     half: bool = False,
     cuda_device: torch.device | str = "cuda:0",
 ) -> List[torch.Tensor]:
-    """对同一 *img* 映射到多个目标空间。始终返回 GPU tensor 列表。"""
-    with torch.no_grad():
-        img_norm = norm_dim(img)
-        img_norm = norm_type(img_norm, cuda=True, half=half, cuda_device=cuda_device)
-        outs: List[torch.Tensor] = []
-        for tgt in targets:
-            out = warp_image(
-                img_norm,
-                source,
-                tgt,
-                pad_value=pad_value,
-                mode=mode,
-                pad_mode=pad_mode,
-                half=half,
-                numpy=False,
-                cuda_device=cuda_device,
+    """Batch resampling of a single image to multiple target spaces.
+    
+    This function efficiently resamples the same input image to multiple target spaces,
+    avoiding redundant memory transfers and data preparation. It's useful for 
+    multi-resolution or multi-view processing scenarios.
+    
+    Args:
+        img: Input image tensor or array in 3D (D,H,W), 4D (C,D,H,W), 
+             or 5D (B,C,D,H,W) format
+        source: Source space defining input image coordinates
+        targets: List of target spaces, each defining an output space
+        pad_value: Padding value for regions outside source image bounds
+        mode: Interpolation mode ("trilinear", "nearest", "bicubic")
+        pad_mode: Padding mode for boundary handling ("constant", "reflect", etc.)
+        half: Whether to use half-precision (float16) for computation
+        cuda_device: CUDA device for GPU computation
+        
+    Returns:
+        List[torch.Tensor]: List of resampled images, always as GPU tensors
+        
+    Raises:
+        ValidationError: If input dimensions are invalid
+        CudaError: If CUDA operations fail
+    """
+    from .validation import (
+        validate_image_tensor, 
+        validate_space, 
+        validate_interpolation_mode,
+        validate_padding_mode,
+        validate_device
+    )
+    
+    try:
+        # 1. 先验证所有输入参数
+        source = validate_space(source, name="source")
+        for i, target in enumerate(targets):
+            validate_space(target, name=f"targets[{i}]")
+        mode = validate_interpolation_mode(mode)
+        pad_mode = validate_padding_mode(pad_mode)
+        device = validate_device(cuda_device)
+        
+        with torch.no_grad():
+            # 2. 先验证图像
+            img_tensor, _ = validate_image_tensor(
+                img, 
+                min_dim=3, 
+                max_dim=5,
+                device=device, 
+                dtype=torch.float16 if half else None,
+                name="img"
             )
-            outs.append(out)
-        return outs
+            
+            # 3. 再进行维度规范化
+            img_norm = norm_dim(img_tensor)
+            
+            # 处理每个目标空间
+            outs: List[torch.Tensor] = []
+            for tgt in targets:
+                out = warp_image(
+                    img_norm,
+                    source,
+                    tgt,
+                    pad_value=pad_value,
+                    mode=mode,
+                    pad_mode=pad_mode,
+                    half=half,
+                    numpy=False,
+                    cuda_device=device,
+                )
+                outs.append(out)
+            return outs
+    except Exception as e:
+        # Convert PyTorch CUDA errors to CudaError
+        if isinstance(e, (RuntimeError, torch.cuda.CudaError)) and ("CUDA" in str(e) or "cuda" in str(e).lower()):
+            from .gpu_utils import handle_cuda_error
+            handle_cuda_error(e, "batch image warping")
+        # Pass through our validation errors
+        elif isinstance(e, (ValidationError, CudaError)):
+            raise
+        # Convert other errors to ValidationError
+        else:
+            raise ValidationError(f"Error during batch image warping: {e}")
 
 
 # -------------------------------------------------------------------------
@@ -496,7 +667,15 @@ def warp_image_batch(
 # -------------------------------------------------------------------------
 
 def warp_image_with_argmax(*args, **kwargs):  # pragma: no cover
-    raise NotImplementedError("warp_image_with_argmax 尚未迁移，可后续按需实现。")
+    """Not implemented yet.
+    
+    This function is reserved for future implementation of combined image warping
+    and argmax operations for efficient segmentation map resampling.
+    
+    Raises:
+        NotImplementedError: Always raised as this function is not yet implemented
+    """
+    raise NotImplementedError("warp_image_with_argmax is not yet implemented and will be added in future releases.")
 
 
 # -------------------------------------------------------------------------
@@ -515,44 +694,63 @@ def warp_dcb_image(
     cuda_device: torch.device | str = "cuda:0",
 ) -> "DicomCubeImage":
     from dicube import DicomCubeImage
-    """将 DicomCubeImage 从其内置空间重采样到目标空间。
+    """Resample a DicomCubeImage from its intrinsic space to a target space.
     
     Args:
-        img: 输入的 DicomCubeImage，使用其内置的 space 作为源空间
-        target: 目标空间
-        pad_value: 填充值
-        mode: 插值模式，默认 "trilinear"
-        pad_mode: 填充模式，默认 "constant"
-        half: 是否使用半精度，默认 False
-        numpy: 是否返回 numpy 格式的图像数据，默认 False
-        cuda_device: CUDA 设备，默认 "cuda:0"
+        img: Input DicomCubeImage with its intrinsic space
+        target: Target geometric space for resampling
+        pad_value: Padding value for regions outside source image bounds
+        mode: Interpolation mode, defaults to "trilinear"
+        pad_mode: Padding mode, defaults to "constant"
+        half: Whether to use half-precision (float16), defaults to False
+        numpy: Whether to return numpy format for image data, defaults to False
+        cuda_device: CUDA device, defaults to "cuda:0"
         
     Returns:
-        DicomCubeImage: 重采样后的新 DicomCubeImage，空间为目标空间
+        DicomCubeImage: New DicomCubeImage with resampled data in target space
         
     Raises:
-        ValueError: 如果输入图像没有空间信息
+        ValidationError: If input image lacks space information or parameters are invalid
+        CudaError: If CUDA operations fail
     """
-    if img.space is None:
-        raise ValueError("DicomCubeImage 必须包含 space 信息才能进行重采样")
+    from .validation import validate_space
     
-    # 使用现有的 warp_image 函数处理图像数据
-    warped_data = warp_image(
-        img.raw_image,
-        source=img.space,
-        target=target,
-        pad_value=pad_value,
-        mode=mode,
-        pad_mode=pad_mode,
-        half=half,
-        numpy=numpy,
-        cuda_device=cuda_device,
-    )
-    
-    # 创建新的 DicomCubeImage，使用重采样后的数据和目标空间
-    return DicomCubeImage(
-        raw_image=warped_data,
-        pixel_header=img.pixel_header,  # 保持像素头信息
-        dicom_meta=img.dicom_meta,      # 保持元数据信息（注意：空间相关的元数据可能需要更新）
-        space=target,                   # 使用目标空间
-    ) 
+    try:
+        # 验证输入参数
+        if img.space is None:
+            raise ValidationError("DicomCubeImage 必须包含 space 信息才能进行重采样")
+            
+        target = validate_space(target, name="target")
+        source = validate_space(img.space, name="source")
+        
+        # 使用现有的 warp_image 函数处理图像数据
+        warped_data = warp_image(
+            img.raw_image,
+            source=source,
+            target=target,
+            pad_value=pad_value,
+            mode=mode,
+            pad_mode=pad_mode,
+            half=half,
+            numpy=numpy,
+            cuda_device=cuda_device,
+        )
+        
+        # 创建新的 DicomCubeImage，使用重采样后的数据和目标空间
+        return DicomCubeImage(
+            raw_image=warped_data,
+            pixel_header=img.pixel_header,  # 保持像素头信息
+            dicom_meta=img.dicom_meta,      # 保持元数据信息（注意：空间相关的元数据可能需要更新）
+            space=target,                   # 使用目标空间
+        ) 
+    except Exception as e:
+        # Convert PyTorch CUDA errors to CudaError
+        if isinstance(e, (RuntimeError, torch.cuda.CudaError)) and ("CUDA" in str(e) or "cuda" in str(e).lower()):
+            from .gpu_utils import handle_cuda_error
+            handle_cuda_error(e, "DICOM image warping")
+        # Pass through our validation errors
+        elif isinstance(e, (ValidationError, CudaError)):
+            raise
+        # Convert other errors to ValidationError
+        else:
+            raise ValidationError(f"Error during DICOM image warping: {e}") 
