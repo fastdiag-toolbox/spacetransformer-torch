@@ -156,6 +156,7 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(CudaError):
             handle_cuda_error(RuntimeError(error_msg), "test operation")
     
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_validation_error_in_warping(self):
         """Test validation errors in image warping."""
         from spacetransformer.torch.image_warpers import warp_image
