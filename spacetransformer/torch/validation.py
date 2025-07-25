@@ -6,9 +6,9 @@ and other parameters specific to GPU-accelerated operations in SpaceTransformer.
 Example:
     Validating tensors in a PyTorch function:
     
-    >>> from spacetransformer.torch.validation import validate_tensor, validate_device
+    >>> from spacetransformer.torch.validation import validate_image_tensor, validate_device
     >>> def process_image(image, device="cuda:0"):
-    ...     image_tensor = validate_tensor(image, expected_dim=5)
+    ...     image_tensor = validate_image_tensor(image, expected_dim=5, return_ndim=False)
     ...     device = validate_device(device)
     ...     # Proceed with validated inputs
 """
@@ -17,11 +17,7 @@ from typing import Any, Optional, Tuple, Union
 import numpy as np
 import torch
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..', 'spacetransformer-core'))
 from spacetransformer.core.exceptions import ValidationError, CudaError
-from spacetransformer.core.validation import validate_space
 
 
 def validate_device(device: Any) -> torch.device:
@@ -70,72 +66,6 @@ def validate_device(device: Any) -> torch.device:
         if "Invalid device string" in str(e) or "CUDA error" in str(e):
             raise CudaError(f"Invalid CUDA device: {e}")
         raise ValidationError(f"Invalid device specification: {e}")
-
-
-def validate_tensor(
-    tensor: Any, 
-    expected_dim: Optional[int] = None, 
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    name: str = "tensor"
-) -> torch.Tensor:
-    """Validate and optionally convert input to PyTorch tensor.
-    
-    Args:
-        tensor: Input tensor or array-like object
-        expected_dim: Expected number of dimensions (None to skip check)
-        dtype: Target data type (None to keep original)
-        device: Target device (None to keep original)
-        name: Parameter name for error messages
-        
-    Returns:
-        torch.Tensor: Validated PyTorch tensor
-        
-    Raises:
-        ValidationError: If tensor is invalid
-        
-    Example:
-        >>> import numpy as np
-        >>> image = np.random.rand(100, 100, 50)
-        >>> tensor = validate_tensor(image, expected_dim=3)
-        >>> tensor = validate_tensor(image, dtype=torch.float32, device="cuda:0")
-    """
-    if not isinstance(tensor, (np.ndarray, torch.Tensor, list, tuple)):
-        raise ValidationError(
-            f"{name} must be a tensor, array, or list/tuple, got {type(tensor).__name__}"
-        )
-        
-    # Convert to torch.Tensor if necessary
-    if not isinstance(tensor, torch.Tensor):
-        try:
-            tensor = torch.as_tensor(tensor)
-        except (ValueError, RuntimeError, TypeError) as e:
-            raise ValidationError(f"Could not convert {name} to tensor: {e}")
-    
-    # Check dimensions
-    if expected_dim is not None and tensor.ndim != expected_dim:
-        raise ValidationError(
-            f"{name} must have {expected_dim} dimensions, got {tensor.ndim}"
-        )
-    
-    # Convert dtype if specified
-    if dtype is not None:
-        try:
-            tensor = tensor.to(dtype)
-        except RuntimeError as e:
-            raise ValidationError(f"Could not convert {name} to {dtype}: {e}")
-    
-    # Move to device if specified
-    if device is not None:
-        try:
-            device = validate_device(device)
-            tensor = tensor.to(device)
-        except CudaError as e:
-            raise e
-        except RuntimeError as e:
-            raise CudaError(f"Device transfer error for {name}: {e}")
-    
-    return tensor
 
 
 def validate_interpolation_mode(mode: str, name: str = "mode") -> str:
@@ -193,51 +123,92 @@ def validate_padding_mode(mode: str, name: str = "pad_mode") -> str:
 
 
 def validate_image_tensor(
-    image: Any,
+    tensor: Any,
+    expected_dim: Optional[int] = None,
     min_dim: int = 3,
     max_dim: int = 5,
     dtype: Optional[torch.dtype] = None,
     device: Optional[Union[str, torch.device]] = None,
-    name: str = "image"
-) -> Tuple[torch.Tensor, int]:
-    """Validate medical image tensor for processing.
+    name: str = "tensor",
+    return_ndim: bool = True
+) -> Union[torch.Tensor, Tuple[torch.Tensor, int]]:
+    """Validate and optionally convert input to PyTorch tensor.
+    
+    This function combines general tensor validation and image-specific validation.
     
     Args:
-        image: Input image as tensor, array, or array-like
-        min_dim: Minimum allowed dimensions (default 3 for 3D medical images)
-        max_dim: Maximum allowed dimensions (default 5 for batched images)
+        tensor: Input tensor or array-like object
+        expected_dim: Expected exact number of dimensions (None to use min_dim/max_dim range)
+        min_dim: Minimum allowed dimensions when expected_dim is None (default 3 for 3D medical images)
+        max_dim: Maximum allowed dimensions when expected_dim is None (default 5 for batched images)
         dtype: Target data type (None to keep original)
         device: Target device (None to keep original)
         name: Parameter name for error messages
+        return_ndim: Whether to return original dimensions count as second return value
         
     Returns:
-        Tuple containing:
-        - torch.Tensor: Validated image tensor
-        - int: Original number of dimensions
+        If return_ndim is True:
+            Tuple[torch.Tensor, int]: (Validated PyTorch tensor, original dimensions)
+        If return_ndim is False:
+            torch.Tensor: Validated PyTorch tensor
         
     Raises:
-        ValidationError: If image is invalid
+        ValidationError: If tensor is invalid
+        CudaError: If CUDA device is specified but not available
         
     Example:
-        >>> import torch
-        >>> image = torch.rand(100, 100, 50)
-        >>> tensor, ndim = validate_image_tensor(image)
-        >>> print(ndim)
-        3
+        >>> import numpy as np
+        >>> image = np.random.rand(100, 100, 50)
+        >>> tensor, ndim = validate_image_tensor(image)  # Image validation with dimensions
+        >>> tensor = validate_image_tensor(image, expected_dim=3, return_ndim=False)  # General validation
+        >>> tensor = validate_image_tensor(image, dtype=torch.float32, device="cuda:0", return_ndim=False)
     """
     try:
-        # Basic tensor validation
-        tensor = validate_tensor(image, dtype=dtype, device=device, name=name)
+        if not isinstance(tensor, (np.ndarray, torch.Tensor, list, tuple)):
+            raise ValidationError(
+                f"{name} must be a tensor, array, or list/tuple, got {type(tensor).__name__}"
+            )
+            
+        # Convert to torch.Tensor if necessary
+        if not isinstance(tensor, torch.Tensor):
+            try:
+                tensor = torch.as_tensor(tensor)
+            except (ValueError, RuntimeError, TypeError) as e:
+                raise ValidationError(f"Could not convert {name} to tensor: {e}")
         
         # Store original dimensions
         original_ndim = tensor.ndim
         
-        # Check dimension range
-        if tensor.ndim < min_dim or tensor.ndim > max_dim:
-            raise ValidationError(
-                f"{name} must have between {min_dim} and {max_dim} dimensions, "
-                f"got {tensor.ndim}"
-            )
+        # Check dimensions - either exact match or range
+        if expected_dim is not None:
+            if tensor.ndim != expected_dim:
+                raise ValidationError(
+                    f"{name} must have {expected_dim} dimensions, got {tensor.ndim}"
+                )
+        else:
+            # Check dimension range
+            if tensor.ndim < min_dim or tensor.ndim > max_dim:
+                raise ValidationError(
+                    f"{name} must have between {min_dim} and {max_dim} dimensions, "
+                    f"got {tensor.ndim}"
+                )
+        
+        # Convert dtype if specified
+        if dtype is not None:
+            try:
+                tensor = tensor.to(dtype)
+            except RuntimeError as e:
+                raise ValidationError(f"Could not convert {name} to {dtype}: {e}")
+        
+        # Move to device if specified
+        if device is not None:
+            try:
+                device = validate_device(device)
+                tensor = tensor.to(device)
+            except CudaError as e:
+                raise e
+            except RuntimeError as e:
+                raise CudaError(f"Device transfer error for {name}: {e}")
         
         # Check for any nan/inf values
         if torch.isnan(tensor).any() or torch.isinf(tensor).any():
@@ -245,7 +216,7 @@ def validate_image_tensor(
                 f"{name} contains NaN or infinite values"
             )
         
-        return tensor, original_ndim
+        return (tensor, original_ndim) if return_ndim else tensor
     except CudaError:
         # Let CUDA errors pass through
         raise

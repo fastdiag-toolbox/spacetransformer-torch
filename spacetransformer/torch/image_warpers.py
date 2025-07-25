@@ -35,9 +35,16 @@ from spacetransformer.core.space import Space
 from spacetransformer.core import relation_check as rc
 from spacetransformer.core.pointset_warpers import calc_transform
 from spacetransformer.core.exceptions import ValidationError, CudaError
+from spacetransformer.core.validation import validate_space
 
 from .affine_builder import build_grid
-from .utils import norm_dim, norm_type
+from .utils import norm_dim
+from .validation import (
+    validate_image_tensor, 
+    validate_interpolation_mode,
+    validate_padding_mode,
+    validate_device
+)
 
 Array = Union[np.ndarray, List[float], List[int], tuple]
 TensorLike = Union[np.ndarray, torch.Tensor]
@@ -178,7 +185,6 @@ def _trans_shift(
     Returns:
         torch.Tensor: Cropped/padded tensor
     """
-    img = norm_type(img, dtype=None)  # Preserve dtype
     M = source.scaled_orientation_matrix
     offset_origin = np.round(np.linalg.solve(M, np.array(target.origin) - np.array(source.origin))).astype(int)
     offset_end = np.round(np.linalg.solve(M, np.array(target.end) - np.array(source.origin))).astype(int) + 1
@@ -199,7 +205,6 @@ def _trans_flip(img: torch.Tensor, flip_dims: List[int]):
     Returns:
         torch.Tensor: Flipped tensor
     """
-    img = norm_type(img, dtype=None)
     dims = []
     for idx in range(3):
         if flip_dims[idx]:
@@ -314,7 +319,7 @@ def _trans_general(
         torch.Tensor: Transformed tensor
     """
     dtype = torch.float32 if not half else torch.float16
-    img = norm_type(img, cuda=True, dtype=dtype)
+    img = img.to(dtype)
 
     theta_np = _calc_theta_ndc(source, target)  # 3×4
     theta = torch.from_numpy(theta_np).to(img.device)
@@ -426,13 +431,6 @@ def warp_image(
         >>> resampled_half = warp_image(image, source, target, 
         ...                            pad_value=0.0, half=True)
     """
-    from .validation import (
-        validate_image_tensor,
-        validate_space, 
-        validate_interpolation_mode,
-        validate_padding_mode,
-        validate_device
-    )
     
     try:
         # 1. 先验证所有输入参数
@@ -449,15 +447,7 @@ def warp_image(
 
         # 完全相同空间：直接返回，避免任何数值误差
         if source == target:
-            print("source == target")
-            if is_numpy_in:
-                if isinstance(img, np.ndarray):
-                    return img
-                else:  # torch.Tensor → numpy 输出
-                    return img.detach().cpu().numpy()
-            else:
-                # 输出 torch.Tensor，维持原 device
-                return img_tensor
+            return img
 
         # 判断无交集
         if rc._check_no_overlap(source, target):
@@ -580,13 +570,6 @@ def warp_image_batch(
         ValidationError: If input dimensions are invalid
         CudaError: If CUDA operations fail
     """
-    from .validation import (
-        validate_image_tensor, 
-        validate_space, 
-        validate_interpolation_mode,
-        validate_padding_mode,
-        validate_device
-    )
     
     try:
         # 1. 先验证所有输入参数

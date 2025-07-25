@@ -11,7 +11,7 @@ import torch
 TensorLike = Union[np.ndarray, torch.Tensor]
 
 
-def norm_dim(tensor: TensorLike) -> torch.Tensor:
+def norm_dim(tensor: torch.Tensor) -> torch.Tensor:
     """Normalize tensor dimensions to 5D (batch, channel, depth, height, width).
     
     This function converts input tensors of various dimensions to a standard
@@ -37,11 +37,6 @@ def norm_dim(tensor: TensorLike) -> torch.Tensor:
         >>> img5d.shape
         torch.Size([1, 1, 50, 100, 100])
     """
-    # Validate input dimensions before processing
-    from .validation import validate_tensor
-    
-    # Basic validation - ensure it's a tensor-like object
-    tensor = validate_tensor(tensor, name="input tensor")
     
     if tensor.ndim < 3 or tensor.ndim > 5:
         raise ValueError(f"Expected 3D, 4D or 5D tensor, got {tensor.ndim}D")
@@ -55,46 +50,3 @@ def norm_dim(tensor: TensorLike) -> torch.Tensor:
         return tensor
 
 
-def norm_type(
-    tensor: TensorLike, 
-    cuda: bool = False, 
-    dtype: Optional[torch.dtype] = None,
-    cuda_device: Union[str, torch.device] = "cuda:0"
-) -> torch.Tensor:
-    """Normalize tensor type, device, and precision.
-    
-    This function converts the input tensor to the specified type, device,
-    and precision, handling both NumPy arrays and PyTorch tensors seamlessly.
-    
-    Args:
-        tensor: Input tensor or array
-        cuda: Whether to move tensor to CUDA device
-        half: Whether to convert tensor to half precision (float16)
-        dtype: Specific dtype to convert tensor to (overrides half)
-        cuda_device: CUDA device to use if cuda=True
-        
-    Returns:
-        torch.Tensor: Normalized tensor with specified properties
-        
-    Example:
-        >>> import numpy as np
-        >>> array = np.random.rand(100, 100, 50).astype(np.float32)
-        >>> tensor = norm_type(array, cuda=True, half=True)
-        >>> tensor.device, tensor.dtype
-        (device(type='cuda', index=0), torch.float16)
-    """
-    # First validate and convert to PyTorch tensor
-    from .validation import validate_tensor, validate_device
-    
-    # Set target device
-    device = None
-    if cuda:
-        device = validate_device(cuda_device)
-    
-    # Set target dtype
-    target_dtype = None
-    if dtype is not None:
-        target_dtype = dtype
-    
-    # Validate tensor with device and dtype conversion
-    return validate_tensor(tensor, dtype=target_dtype, device=device, name="input tensor") 

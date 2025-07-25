@@ -20,7 +20,6 @@ from spacetransformer.core import Space
 # Import torch package validation
 from spacetransformer.torch.validation import (
     validate_device,
-    validate_tensor, 
     validate_interpolation_mode,
     validate_padding_mode,
     validate_image_tensor
@@ -58,27 +57,27 @@ class TestTorchValidation(unittest.TestCase):
         self.assertTrue(str(device) == "cuda:0" or str(device) == "cpu")
     
     def test_validate_tensor(self):
-        """Test tensor validation."""
+        """Test tensor validation with validate_image_tensor."""
         # Test numpy array conversion
         np_array = np.random.rand(10, 10, 10)
-        tensor = validate_tensor(np_array)
+        tensor = validate_image_tensor(np_array, return_ndim=False)
         self.assertIsInstance(tensor, torch.Tensor)
         self.assertEqual(tensor.shape, (10, 10, 10))
         
         # Test dimension check
         with self.assertRaises(ValidationError):
-            validate_tensor(np_array, expected_dim=2)
+            validate_image_tensor(np_array, expected_dim=2, return_ndim=False)
         
-        tensor2 = validate_tensor(np_array, expected_dim=3)
+        tensor2 = validate_image_tensor(np_array, expected_dim=3, return_ndim=False)
         self.assertEqual(tensor2.ndim, 3)
         
         # Test dtype conversion
-        float_tensor = validate_tensor(np_array, dtype=torch.float32)
+        float_tensor = validate_image_tensor(np_array, dtype=torch.float32, return_ndim=False)
         self.assertEqual(float_tensor.dtype, torch.float32)
         
         # Test invalid input
         with self.assertRaises(ValidationError):
-            validate_tensor("not a tensor")
+            validate_image_tensor("not a tensor", return_ndim=False)
     
     def test_validate_interpolation_mode(self):
         """Test interpolation mode validation."""
