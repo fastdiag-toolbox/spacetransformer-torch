@@ -291,7 +291,6 @@ def _trans_general(
     img: torch.Tensor,
     source: Space,
     target: Space,
-    *,
     mode: str,
     pad_mode: str,
     pad_value: float,
@@ -326,29 +325,6 @@ def _trans_general(
     return _do_warping(img, grid, mode=mode, pad_mode=pad_mode, pad_value=pad_value)
 
 
-def _trans_zoom(img: torch.Tensor, source: Space, target: Space, pad_mode: str, pad_value: float, mode: str, half: bool):
-    """Perform pure scaling transformation using interpolate.
-    
-    This function handles transformations that only involve scaling,
-    using PyTorch's interpolate function for better performance.
-    
-    Args:
-        img: Input tensor
-        source: Source geometric space
-        target: Target geometric space
-        pad_mode: Padding mode
-        pad_value: Padding value
-        mode: Interpolation mode
-        half: Whether to use half precision
-        
-    Returns:
-        torch.Tensor: Scaled tensor
-    """
-    if 'linear' in mode:
-        return F.interpolate(img, target.shape, align_corners=True, mode=mode)
-    else:
-        # F.interpolate(nearest-exact) use align_corners=False convention, so avoid to use it
-        return _trans_general(img, source, target, mode=mode, pad_mode=pad_mode, pad_value=pad_value, half=half)
 # -------------------------------------------------------------------------
 # 空输出 ------------------------------------------------------------------
 # -------------------------------------------------------------------------
@@ -524,8 +500,9 @@ def warp_image(
                 tmp = _trans_flip(img_AC, flip_dims)
                 img_CD = _trans_permute(tmp, axis_order)
             else:  
-                if rc._check_align_corner(C, D) and rc._check_same_base(C, D):
-                    img_CD = _trans_zoom(img_AC, C, D, pad_mode=pad_mode, pad_value=pad_value, mode=mode, half=half)
+                img_AC = img_AC.to(device)
+                if rc._check_align_corner(C, D) and rc._check_same_base(C, D) and 'linear' in mode:
+                    img_CD = F.interpolate(img_AC, D.shape, align_corners=True, mode=mode)
                 else:  
                     img_CD = _trans_general(
                         img_AC,
