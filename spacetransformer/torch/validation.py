@@ -182,11 +182,8 @@ def validate_padding_mode(mode: str, name: str = "pad_mode") -> str:
         'zeros'
         >>> validate_padding_mode("invalid")  # Will raise ValidationError
     """
-    valid_modes = ["zeros", "border", "reflection", "constant"]
+    valid_modes = ["border", "reflection", "constant"]
     
-    # Handle PyTorch naming conventions
-    if mode == "constant":
-        mode = "zeros"
     
     if mode not in valid_modes:
         raise ValidationError(

@@ -160,7 +160,6 @@ def _trans_shift(
     img: torch.Tensor,
     source: Space,
     target: Space,
-    *,
     pad_mode: str,
     pad_value: float,
 ) -> torch.Tensor:
@@ -180,8 +179,7 @@ def _trans_shift(
         torch.Tensor: Cropped/padded tensor
     """
     img = norm_type(img, dtype=None)  # Preserve dtype
-    R = source._orientation_matrix()
-    M = R * np.array(source.spacing)[None, :]
+    M = source.scaled_orientation_matrix
     offset_origin = np.round(np.linalg.solve(M, np.array(target.origin) - np.array(source.origin))).astype(int)
     offset_end = np.round(np.linalg.solve(M, np.array(target.end) - np.array(source.origin))).astype(int) + 1
     return crop(img, offset_origin, offset_end, pad_mode=pad_mode, pad_value=pad_value)
@@ -260,6 +258,7 @@ def to_ndc_space(space:Space) -> Space:
     new_origin = np.array(space.origin) + np.array(space.physical_span) / 2
     new_shape = (2, 2, 2)
     new_spacing = np.array(space.spacing) * (np.array(space.shape) - 1) / 2
+    new_spacing[new_spacing==0] = 1
     return Space(origin=new_origin, spacing=new_spacing, shape=new_shape,
                  x_orientation=space.x_orientation,
                  y_orientation=space.y_orientation,
@@ -315,7 +314,8 @@ def _trans_general(
     Returns:
         torch.Tensor: Transformed tensor
     """
-    img = norm_type(img, cuda=True, half=half)
+    dtype = torch.float32 if not half else torch.float16
+    img = norm_type(img, cuda=True, dtype=dtype)
 
     theta_np = _calc_theta_ndc(source, target)  # 3×4
     theta = torch.from_numpy(theta_np).to(img.device)

@@ -58,7 +58,6 @@ def norm_dim(tensor: TensorLike) -> torch.Tensor:
 def norm_type(
     tensor: TensorLike, 
     cuda: bool = False, 
-    half: bool = False,
     dtype: Optional[torch.dtype] = None,
     cuda_device: Union[str, torch.device] = "cuda:0"
 ) -> torch.Tensor:
@@ -96,8 +95,6 @@ def norm_type(
     target_dtype = None
     if dtype is not None:
         target_dtype = dtype
-    elif half:
-        target_dtype = torch.float16
     
     # Validate tensor with device and dtype conversion
     return validate_tensor(tensor, dtype=target_dtype, device=device, name="input tensor") 
