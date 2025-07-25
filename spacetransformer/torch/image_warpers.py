@@ -344,9 +344,11 @@ def _trans_zoom(img: torch.Tensor, source: Space, target: Space, pad_mode: str, 
     Returns:
         torch.Tensor: Scaled tensor
     """
-    if mode == 'nearest':
-        mode = 'nearest-exact'
-    return F.interpolate(img, target.shape, align_corners=True, mode=mode)
+    if 'linear' in mode:
+        return F.interpolate(img, target.shape, align_corners=True, mode=mode)
+    else:
+        # F.interpolate(nearest-exact) use align_corners=False convention, so avoid to use it
+        return _trans_general(img, source, target, mode=mode, pad_mode=pad_mode, pad_value=pad_value, half=half)
 # -------------------------------------------------------------------------
 # 空输出 ------------------------------------------------------------------
 # -------------------------------------------------------------------------
@@ -381,7 +383,6 @@ def warp_image(
     img: TensorLike,
     source: Space,
     target: Space,
-    *,
     pad_value: float,
     mode: str = "trilinear",
     pad_mode: str = "constant",

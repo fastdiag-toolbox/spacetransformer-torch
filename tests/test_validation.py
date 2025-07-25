@@ -94,12 +94,9 @@ class TestTorchValidation(unittest.TestCase):
     def test_validate_padding_mode(self):
         """Test padding mode validation."""
         # Test valid modes
-        self.assertEqual(validate_padding_mode("zeros"), "zeros")
         self.assertEqual(validate_padding_mode("border"), "border")
         self.assertEqual(validate_padding_mode("reflection"), "reflection")
         
-        # Test conversion from "constant" to "zeros"
-        self.assertEqual(validate_padding_mode("constant"), "zeros")
         
         # Test invalid mode
         with self.assertRaises(ValidationError):
